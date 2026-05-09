@@ -14,6 +14,8 @@ interface ExchangeConfig {
   id: string
   apiKey?: string
   secret?: string
+  // maps canonical symbol (e.g. BTC/USDT) to exchange-specific symbol (e.g. BTC/USDT:USDT)
+  symbolMap?: Record<string, string>
 }
 
 export class FeedManager {
@@ -45,12 +47,14 @@ export class FeedManager {
 
     // Start all watch loops in parallel — never await sequentially
     const loops: Promise<void>[] = []
-    for (const [exchangeId, exchange] of this.exchanges) {
+    for (const config of this.exchangeConfigs) {
+      const exchange = this.exchanges.get(config.id)!
       for (const symbol of this.symbols) {
-        if (exchange.markets[symbol]) {
-          loops.push(this.watchLoop(exchangeId, exchange, symbol))
+        const exchangeSymbol = config.symbolMap?.[symbol] ?? symbol
+        if (exchange.markets[exchangeSymbol]) {
+          loops.push(this.watchLoop(config.id, exchange, symbol, exchangeSymbol))
         } else {
-          console.warn(`[FeedManager] ${exchangeId} does not support ${symbol}, skipping`)
+          console.warn(`[FeedManager] ${config.id} does not support ${symbol}, skipping`)
         }
       }
     }
@@ -66,12 +70,12 @@ export class FeedManager {
     this.exchanges.clear()
   }
 
-  private async watchLoop(exchangeId: string, exchange: Exchange, symbol: string): Promise<void> {
-    console.log(`[FeedManager] starting feed: ${exchangeId} ${symbol}`)
+  private async watchLoop(exchangeId: string, exchange: Exchange, symbol: string, exchangeSymbol = symbol): Promise<void> {
+    console.log(`[FeedManager] starting feed: ${exchangeId} ${symbol}${exchangeSymbol !== symbol ? ` (as ${exchangeSymbol})` : ''}`)
 
     while (this.running) {
       try {
-        const ob = await exchange.watchOrderBook(symbol, 10)
+        const ob = await exchange.watchOrderBook(exchangeSymbol, 10)
 
         const bid = ob.bids[0]?.[0]
         const ask = ob.asks[0]?.[0]

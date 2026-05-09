@@ -1,68 +1,57 @@
 import { connectRedis, disconnectRedis } from './cache/client'
 import { disconnectDb } from './db/client'
-import { FeedManager } from './feeds/feed-manager'
+import { BinanceFeed } from './feeds/binance-feed'
+import { KrakenFeed } from './feeds/kraken-feed'
+import { BlofInFeed } from './feeds/blofin-feed'
+import { BitunixFeed } from './feeds/bitunix-feed'
 import { FeeCalculator } from './core/fees'
 import { OpportunityDetector } from './core/detector'
 import { RiskManager } from './core/risk'
 import { Executor } from './core/executor'
 import { TelegramNotifier } from './notifications/telegram'
-import ccxt from 'ccxt'
-import type { Exchange } from 'ccxt'
 
 const SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT']
+const EXCHANGES = ['binance', 'kraken', 'blofin', 'bitunix']
 
-const EXCHANGE_CONFIGS = [
-  {
-    id:     'binance',
-    apiKey: process.env.BINANCE_API_KEY,
-    secret: process.env.BINANCE_SECRET,
-  },
-  {
-    id:     'kraken',
-    apiKey: process.env.KRAKEN_API_KEY,
-    secret: process.env.KRAKEN_SECRET,
-  },
-  {
-    id:     'blofin',
-    apiKey: process.env.BLOFIN_API_KEY,
-    secret: process.env.BLOFIN_SECRET,
-  },
-]
+// Static taker fees (maker ≈ 0 or lower; executor always takes liquidity)
+// Binance: standard 0.10%; with BNB discount or VIP tiers can be lower
+// Kraken:  standard 0.26% spot taker; adjust if you have a fee discount
+// BloFin:  standard 0.06%; with −60% VIP discount: 0.024% = 0.00024
+// Bitunix: standard 0.06%; with −80% VIP discount: 0.012% = 0.00012 (configured via env)
+const EXCHANGE_FEES: Record<string, { maker: number; taker: number }> = {
+  binance: { maker: 0.001,   taker: 0.001   },
+  kraken:  { maker: 0.0016,  taker: 0.0026  },
+  blofin:  { maker: 0.0002,  taker: 0.00024 },
+}
 
 async function main(): Promise<void> {
   console.log('[Engine] starting...')
   console.log(`[Engine] paper trading: ${process.env.PAPER_TRADING !== 'false'}`)
   console.log(`[Engine] symbols: ${SYMBOLS.join(', ')}`)
-  console.log(`[Engine] exchanges: ${EXCHANGE_CONFIGS.map((e) => e.id).join(', ')}`)
+  console.log(`[Engine] exchanges: ${EXCHANGES.join(', ')}`)
 
   await connectRedis()
   console.log('[Engine] Redis connected')
 
-  // Load REST exchange instances for fee data
-  const restExchanges = new Map<string, Exchange>()
-  for (const config of EXCHANGE_CONFIGS) {
-    const ExchangeClass = (ccxt as unknown as Record<string, new (config: object) => Exchange>)[config.id]
-    if (!ExchangeClass) throw new Error(`Exchange not supported: ${config.id}`)
-    const exchange = new ExchangeClass({ enableRateLimit: true })
-    await exchange.loadMarkets()
-    restExchanges.set(config.id, exchange)
+  const feeCalc = new FeeCalculator()
+  for (const [id, fees] of Object.entries(EXCHANGE_FEES)) {
+    feeCalc.setStaticFees(id, fees.maker, fees.taker)
   }
-
-  const feeCalc  = new FeeCalculator()
-  await feeCalc.loadFees(restExchanges)
+  const bitunixTaker = Number(process.env.BITUNIX_TAKER_FEE ?? '0.00012')
+  feeCalc.setStaticFees('bitunix', bitunixTaker * 0.8, bitunixTaker)
 
   const telegram = new TelegramNotifier()
   const riskMgr  = new RiskManager((msg) => telegram.circuitBreaker(msg))
   const executor = new Executor(
     riskMgr,
-    EXCHANGE_CONFIGS,
+    [],   // no CCXT exchange configs — native feeds only
     (msg) => telegram.circuitBreaker(msg),
   )
 
   if (telegram.enabled) await telegram.info('Engine started ✅')
 
   const detector = new OpportunityDetector(
-    EXCHANGE_CONFIGS.map((e) => e.id),
+    EXCHANGES,
     feeCalc,
     async (opp) => {
       await telegram.opportunity(opp)
@@ -70,21 +59,21 @@ async function main(): Promise<void> {
     },
   )
 
-  const feedMgr = new FeedManager(EXCHANGE_CONFIGS, SYMBOLS)
-
-  // Refresh fees hourly in the background
-  const feeRefreshInterval = setInterval(async () => {
-    if (feeCalc.isStale()) {
-      await feeCalc.loadFees(restExchanges)
-    }
-  }, 60_000)
+  const binanceFeed = new BinanceFeed(SYMBOLS)
+  const krakenFeed  = new KrakenFeed(SYMBOLS)
+  const blofInFeed  = new BlofInFeed(SYMBOLS)
+  const bitunixFeed = new BitunixFeed(SYMBOLS)
 
   // Graceful shutdown
   const shutdown = async () => {
     console.log('\n[Engine] shutting down...')
-    clearInterval(feeRefreshInterval)
     detector.stop()
-    await feedMgr.stop()
+    await Promise.all([
+      binanceFeed.stop(),
+      krakenFeed.stop(),
+      blofInFeed.stop(),
+      bitunixFeed.stop(),
+    ])
     await disconnectRedis()
     await disconnectDb()
     console.log('[Engine] stopped')
@@ -94,11 +83,14 @@ async function main(): Promise<void> {
   process.on('SIGINT',  shutdown)
   process.on('SIGTERM', shutdown)
 
-  // Start detector first so it's ready when price ticks arrive
   await detector.start()
 
-  // Start feed — this runs indefinitely via Promise.all internal loops
-  await feedMgr.start()
+  await Promise.all([
+    binanceFeed.start(),
+    krakenFeed.start(),
+    blofInFeed.start(),
+    bitunixFeed.start(),
+  ])
 }
 
 main().catch((err) => {

@@ -1,0 +1,19 @@
+# Local dev: starts only postgres + redis (engine and API run with `bun run dev`)
+services:
+  postgres:
+    extends:
+      file: docker-compose.yml
+      service: postgres
+    ports:
+      - "5432:5432"
+
+  redis:
+    extends:
+      file: docker-compose.yml
+      service: redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
+  redis_data:

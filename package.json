@@ -8,6 +8,8 @@
     "engine": "bun run --hot src/engine.ts",
     "api": "bun run --hot src/api/index.ts",
     "dev:all": "bun run --hot src/engine.ts & bun run --hot src/api/index.ts",
+    "infra:up": "docker compose -f docker-compose.dev.yml up -d",
+    "infra:down": "docker compose -f docker-compose.dev.yml down",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "db:generate": "drizzle-kit generate",

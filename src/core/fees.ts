@@ -42,6 +42,16 @@ export class FeeCalculator {
     console.log('[FeeCalculator] fee schedules loaded')
   }
 
+  // For exchanges not managed by CCXT (e.g. Bitunix native feed).
+  // Applied to ALL symbols on that exchange — pass effective fee after any VIP discount.
+  setStaticFees(exchangeId: string, maker: number, taker: number): void {
+    const symbolFees = new Map<string, FeeSchedule>()
+    // Sentinel key '*' matched by getTakerFee when no symbol-specific fee exists
+    symbolFees.set('*', { maker: new Decimal(maker), taker: new Decimal(taker) })
+    this.cache.set(exchangeId, symbolFees)
+    console.log(`[FeeCalculator] static fees set for ${exchangeId}: maker=${maker} taker=${taker}`)
+  }
+
   isStale(): boolean {
     return Date.now() - this.lastRefresh > this.refreshIntervalMs
   }
@@ -73,7 +83,8 @@ export class FeeCalculator {
   }
 
   private getTakerFee(exchangeId: string, symbol: string): Decimal {
-    const fee = this.cache.get(exchangeId)?.get(symbol)?.taker
+    const exFees = this.cache.get(exchangeId)
+    const fee = exFees?.get(symbol)?.taker ?? exFees?.get('*')?.taker
     if (!fee) {
       console.warn(`[FeeCalculator] no fee for ${exchangeId}/${symbol}, using default 0.1%`)
       return new Decimal('0.001')
